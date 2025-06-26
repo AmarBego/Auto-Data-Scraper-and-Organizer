@@ -308,7 +308,7 @@ def setup_scrapy_project():
 
     if not os.path.exists(project_inner):
         print("Creating Scrapy project structure...")
-        subprocess.check_call(["scrapy", "startproject", project_name])
+        subprocess.check_call([sys.executable, "-m", "scrapy", "startproject", project_name])
 
     files_to_update = {
         'middlewares.py': '''
