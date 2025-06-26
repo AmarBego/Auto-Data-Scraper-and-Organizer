@@ -39,7 +39,11 @@ def setup_environment():
     # Restart script using virtual env Python
     if sys.executable != python_exec:
         print("Restarting with virtual environment...")
-        os.execv(python_exec, [python_exec] + sys.argv)
+        if os.name == 'nt':  # Windows
+            subprocess.run([python_exec] + sys.argv)
+            sys.exit(0)
+        else:  # Unix-like systems
+            os.execv(python_exec, [python_exec] + sys.argv)
 
 def check_car_brands():
     """Check if car_brands.json exists and has the correct structure"""
