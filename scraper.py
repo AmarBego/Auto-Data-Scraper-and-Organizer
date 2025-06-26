@@ -7,7 +7,7 @@ import json
 def setup_environment():
     """Create virtual environment and install required packages"""
     venv_dir = os.path.join(os.path.dirname(__file__), '.venv')
-    python_exec = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python')
+    python_exec = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python.exe' if os.name == 'nt' else 'python')
     
     if not os.path.exists(venv_dir):
         print("Creating virtual environment...")
@@ -37,7 +37,11 @@ def setup_environment():
         print("Packages installed successfully")
     
     # Restart script using virtual env Python
-    if sys.executable != python_exec:
+    # Normalize paths for comparison on Windows
+    current_exec = os.path.normpath(sys.executable).lower()
+    target_exec = os.path.normpath(python_exec).lower()
+    
+    if current_exec != target_exec:
         print("Restarting with virtual environment...")
         if os.name == 'nt':  # Windows
             subprocess.run([python_exec] + sys.argv)
