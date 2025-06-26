@@ -67,7 +67,7 @@ def check_car_brands():
         sys.exit(1)
     
     try:
-        with open('car_brands.json', 'r') as f:
+        with open('car_brands.json', 'r', encoding='utf-8') as f:
             brands = json.load(f)
             if not isinstance(brands, list) or not all('name' in item for item in brands):
                 raise ValueError("Invalid structure")
@@ -85,6 +85,9 @@ from tqdm import tqdm
 import os
 import inquirer
 import scrapy
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 SITEMAP_URL = "https://www.auto-data.net/sitemap.xml"
 OUTPUT_FILE = "sitemap_links.txt"
@@ -109,41 +112,83 @@ LOCALES = {
 }
 
 def get_sitemap_links():
-    """Fetch and parse the main sitemap"""
-    response = requests.get(SITEMAP_URL)
-    soup = BeautifulSoup(response.content, 'lxml-xml')
-    return [loc.text for loc in soup.find_all('loc') if C_PATTERN in loc.text]
+    """Fetch and parse the main sitemap using faster XML parsing"""
+    try:
+        response = requests.get(SITEMAP_URL, timeout=30)
+        response.raise_for_status()
+        
+        # Use ElementTree for faster XML parsing
+        root = ET.fromstring(response.content)
+        
+        # Handle XML namespaces
+        namespaces = {'': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+        
+        sitemap_urls = []
+        for loc in root.findall('.//loc', namespaces):
+            if loc.text and C_PATTERN in loc.text:
+                sitemap_urls.append(loc.text)
+        
+        print(f"Found {len(sitemap_urls)} sitemap URLs")
+        return sitemap_urls
+        
+    except Exception as e:
+        print(f"Error fetching main sitemap: {e}")
+        # Fallback to BeautifulSoup if ElementTree fails
+        response = requests.get(SITEMAP_URL)
+        soup = BeautifulSoup(response.content, 'lxml-xml')
+        return [loc.text for loc in soup.find_all('loc') if C_PATTERN in loc.text]
+
+def extract_urls_fast(sitemap_url):
+    """Extract URLs from a sitemap using faster XML parsing"""
+    try:
+        response = requests.get(sitemap_url, timeout=30)
+        response.raise_for_status()
+        
+        # Use ElementTree for faster parsing
+        root = ET.fromstring(response.content)
+        
+        # Handle XML namespaces
+        namespaces = {'': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+        
+        urls = []
+        for loc in root.findall('.//loc', namespaces):
+            if loc.text:
+                urls.append(loc.text)
+        
+        return urls
+        
+    except Exception as e:
+        print(f"Error parsing {sitemap_url}: {e}")
+        return []
 
 def extract_urls(sitemap_url):
-    """Extract URLs from a sitemap page"""
-    response = requests.get(sitemap_url)
-    soup = BeautifulSoup(response.content, 'lxml-xml')
-    return [loc.text for loc in soup.find_all('loc')]
+    """Extract URLs from a sitemap page - kept for compatibility"""
+    return extract_urls_fast(sitemap_url)
 
 def load_existing_links():
     """Load existing links from output file"""
     if not os.path.exists(OUTPUT_FILE):
         return set()
-    with open(OUTPUT_FILE, 'r') as f:
+    with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
         return set(line.strip() for line in f)
 
 def save_new_links(new_links):
     """Save new links to file"""
-    with open(OUTPUT_FILE, 'a') as f:
+    with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
         f.writelines(f"{link}\n" for link in sorted(new_links)) 
 
 def log_new_links(count):
     """Log new links added"""
     if count > 0:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(LOG_FILE, 'a') as f:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{timestamp} - Added {count} new links\n")
 
 def check_locale_file():
     """Check if saved_locale.txt exists and is valid"""
     if os.path.exists('saved_locale.txt'):
         try:
-            with open('saved_locale.txt', 'r') as f:
+            with open('saved_locale.txt', 'r', encoding='utf-8') as f:
                 locale = f.read().strip()
                 if locale not in LOCALES:
                     print("Warning: saved_locale.txt contains an invalid locale.")
@@ -156,7 +201,7 @@ def check_locale_file():
 
 def save_locale(locale):
     """Save selected locale to file"""
-    with open('saved_locale.txt', 'w') as f:
+    with open('saved_locale.txt', 'w', encoding='utf-8') as f:
         f.write(locale)
 
 def select_locales():
@@ -205,11 +250,49 @@ def filter_by_locale_and_brand(urls, locales, brands):
                 break
                 
     return sorted(filtered_urls)
+                
+def process_sitemap_batch(sitemap_urls, locales, brands, existing_links):
+    """Process a batch of sitemaps concurrently"""
+    new_links = set()
+    
+    def process_single_sitemap(sitemap_url):
+        try:
+            urls = extract_urls_fast(sitemap_url)
+            filtered_urls = filter_by_locale_and_brand(urls, locales, brands)
+            return [url for url in filtered_urls if url not in existing_links]
+        except Exception as e:
+            print(f"Error processing {sitemap_url}: {e}")
+            return []
+    
+    # Use ThreadPoolExecutor for concurrent processing
+    max_workers = min(100, len(sitemap_urls))  # Limit concurrent requests
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_sitemap = {
+            executor.submit(process_single_sitemap, sitemap_url): sitemap_url 
+            for sitemap_url in sitemap_urls
+        }
+        
+        # Process completed tasks with progress bar
+        with tqdm(total=len(sitemap_urls), desc="Processing sitemaps") as pbar:
+            for future in as_completed(future_to_sitemap):
+                sitemap_url = future_to_sitemap[future]
+                try:
+                    urls = future.result()
+                    new_links.update(urls)
+                    pbar.set_postfix({'New URLs': len(new_links)})
+                except Exception as e:
+                    print(f"Error processing {sitemap_url}: {e}")
+                finally:
+                    pbar.update(1)
+    
+    return new_links
 
 def setup_scrapy_project():
     """Create and configure Scrapy project with proxy support"""
     venv_dir = os.path.join(os.path.dirname(__file__), '.venv')
-    python_exec = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python')
+    python_exec = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python.exe' if os.name == 'nt' else 'python')
     
     project_name = "autodata"
     project_root = os.path.join(os.getcwd(), project_name)
@@ -406,7 +489,7 @@ class AutoDataSpider(scrapy.Spider):
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     links_file = os.path.join(project_root, '../sitemap_links.txt')
     
-    with open(links_file) as f:
+    with open(links_file, encoding='utf-8') as f:
         start_urls = [line.strip() for line in f if line.strip()]
 
     def parse(self, response):
@@ -433,7 +516,7 @@ class AutoDataSpider(scrapy.Spider):
         print(f"1. Add at least 10 proxies to {os.path.abspath(proxies_path)}")
         print("2. Save the file before continuing\n")
 
-        with open(proxies_path, 'w') as f:
+        with open(proxies_path, 'w', encoding='utf-8') as f:
             f.write("# Add proxies here (one per line)\n")
             f.write("# Format: ip:port\n")
             f.write("# Example: 123.45.67.89:8080\n")
@@ -448,7 +531,7 @@ class AutoDataSpider(scrapy.Spider):
             print("Aborting: Proxy setup required")
             sys.exit(1)
 
-    with open(proxies_path, 'r') as f:
+    with open(proxies_path, 'r', encoding='utf-8') as f:
         proxies = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
     import re
@@ -467,7 +550,7 @@ class AutoDataSpider(scrapy.Spider):
         sys.exit(1)
 
     settings_path = os.path.join(project_inner, 'settings.py')
-    with open(settings_path, 'a') as f:
+    with open(settings_path, 'a', encoding='utf-8') as f:
         f.write(f"\nPROXY_LIST = {proxies}\n")
 
     print("\n\033[1;32mConfiguration complete!\033[0m")
@@ -490,7 +573,7 @@ def process_and_organize_data():
         format='%(asctime)s - %(message)s'
     )
 
-    with open('car_brands.json') as f:
+    with open('car_brands.json', 'r', encoding='utf-8') as f:
         brands = json.load(f)
     
     brand_lookup = defaultdict(list)
@@ -512,10 +595,10 @@ def process_and_organize_data():
     submodel_counter = 1
     variant_counter = 1
 
-    with open('sitemap_links.txt') as f:
+    with open('sitemap_links.txt', encoding='utf-8') as f:
         total_links = len(f.read().splitlines())
 
-    with open('sitemap_links.txt') as f:
+    with open('sitemap_links.txt', encoding='utf-8') as f:
         for link in tqdm(f.read().splitlines(), total=total_links, desc="Processing links"):
             if '/en/bmw-' in link:
                 match = re.search(r'/en/bmw-([\w-]+)-\d+$', link)
@@ -633,7 +716,7 @@ def process_and_organize_data():
 
     def process_json_file(file_path):
         try:
-            with open(file_path) as f:
+            with open(file_path, encoding='utf-8') as f:
                 data = json.load(f)
         except Exception as e:
             logging.error(f"Error processing {file_path}: {str(e)}")
@@ -804,15 +887,15 @@ def process_and_organize_data():
         
         final_output.append(brand_entry)
 
-    with open('organized_car_models.json', 'w') as f:
-        json.dump(final_output, f, indent=2)
+    with open('organized_car_models.json', 'w', encoding='utf-8') as f:
+        json.dump(final_output, f, indent=2, ensure_ascii=False)
     print("Data organization complete! Output saved to organized_car_models.json")
 
 
 def main():
     check_car_brands()
     
-    with open('car_brands.json', 'r') as f:
+    with open('car_brands.json', 'r', encoding='utf-8') as f:
         brands = json.load(f)
     
     selected_locales = select_locales()
@@ -820,24 +903,25 @@ def main():
         print("No locales selected. Exiting.")
         return
     
+    print("Fetching sitemap index...")
     c_sitemaps = get_sitemap_links()
     
+    print("Loading existing links...")
     existing_links = load_existing_links()
-    new_links = set()
     
-    for sitemap in tqdm(c_sitemaps, desc="Processing sitemaps"):
-        urls = extract_urls(sitemap)
-        filtered_urls = filter_by_locale_and_brand(urls, selected_locales, brands)
-        
-        batch = [url for url in filtered_urls 
-                if url not in existing_links]
-        
-        new_links.update(batch)
+    print(f"Processing {len(c_sitemaps)} sitemaps concurrently...")
+    start_time = time.time()
+    
+    # Process all sitemaps concurrently
+    new_links = process_sitemap_batch(c_sitemaps, selected_locales, brands, existing_links)
+    
+    end_time = time.time()
+    print(f"Processing completed in {end_time - start_time:.2f} seconds")
     
     if new_links:
         save_new_links(new_links)
         log_new_links(len(new_links))
-        print(f"Added {len(new_links)} new links (TEST MODE: 100 max)")
+        print(f"Added {len(new_links)} new links")
     else:
         print("No new links found for selected locales")
 

@@ -1,0 +1,7 @@
+# virtual environments
+
+.venv
+saved_locale.txt
+sitemap_links.txt
+autodata/
+sitemap.log
